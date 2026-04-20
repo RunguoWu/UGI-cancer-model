@@ -1,0 +1,89 @@
+1
+Activating R shared library Spack environment, please wait...
+
+Loading R/4.5.1
+  Loading requirement: spack/0.23.1
+-- Attaching core tidyverse packages ------------------------ tidyverse 2.0.0 --
+v dplyr     1.1.4     v readr     2.1.5
+v forcats   1.0.0     v stringr   1.5.1
+v ggplot2   3.5.2     v tibble    3.3.0
+v lubridate 1.9.4     v tidyr     1.3.1
+v purrr     1.0.4     
+-- Conflicts ------------------------------------------ tidyverse_conflicts() --
+x dplyr::filter() masks stats::filter()
+x dplyr::lag()    masks stats::lag()
+i Use the conflicted package (<http://conflicted.r-lib.org/>) to force all conflicts to become errors
+
+Attaching package: 'scales'
+
+The following object is masked from 'package:purrr':
+
+    discard
+
+The following object is masked from 'package:readr':
+
+    col_factor
+
+
+Attaching package: 'foreach'
+
+The following objects are masked from 'package:purrr':
+
+    accumulate, when
+
+Loading required package: iterators
+Loading required package: snow
+
+Attaching package: 'parallel'
+
+The following objects are masked from 'package:snow':
+
+    closeNode, clusterApply, clusterApplyLB, clusterCall, clusterEvalQ,
+    clusterExport, clusterMap, clusterSplit, makeCluster, parApply,
+    parCapply, parLapply, parRapply, parSapply, recvData, recvOneData,
+    sendData, splitIndices, stopCluster
+
+Loading required package: Matrix
+
+Attaching package: 'Matrix'
+
+The following objects are masked from 'package:tidyr':
+
+    expand, pack, unpack
+
+
+Attaching package: 'expm'
+
+The following object is masked from 'package:Matrix':
+
+    expm
+
+[1] "1"                                           
+[2] "/data/WIPH-CanDetect/HealthEco/output/optim/"
+[3] "age70plus"                                   
+[4] "female"                                      
+[5] "RS"                                          
+[6] "500000"                                      
+[7] "opt_upd2026"                                 
+[1] 1
+# A tibble: 16 x 3
+   site  age70plus female
+   <fct>     <dbl>  <dbl>
+ 1 panc          0      0
+ 2 oeso          0      0
+ 3 stom          0      0
+ 4 galb          0      0
+ 5 panc          0      1
+ 6 oeso          0      1
+ 7 stom          0      1
+ 8 galb          0      1
+ 9 panc          1      0
+10 oeso          1      0
+11 stom          1      0
+12 galb          1      0
+13 panc          1      1
+14 oeso          1      1
+15 stom          1      1
+16 galb          1      1
+[1] "Processing: site = panc ; age70plus = 0 ; female = 0"
+[1] "Method: RS ; Sampling no.: 5e+05"

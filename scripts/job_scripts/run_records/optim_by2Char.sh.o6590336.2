@@ -1,0 +1,88 @@
+2
+Activating R shared library Spack environment, please wait...
+
+Loading R/4.5.1
+  Loading requirement: spack/0.23.1
+-- Attaching core tidyverse packages ------------------------ tidyverse 2.0.0 --
+v dplyr     1.1.4     v readr     2.1.5
+v forcats   1.0.0     v stringr   1.5.1
+v ggplot2   3.5.2     v tibble    3.3.0
+v lubridate 1.9.4     v tidyr     1.3.1
+v purrr     1.0.4     
+-- Conflicts ------------------------------------------ tidyverse_conflicts() --
+x dplyr::filter() masks stats::filter()
+x dplyr::lag()    masks stats::lag()
+i Use the conflicted package (<http://conflicted.r-lib.org/>) to force all conflicts to become errors
+
+Attaching package: 'scales'
+
+The following object is masked from 'package:purrr':
+
+    discard
+
+The following object is masked from 'package:readr':
+
+    col_factor
+
+
+Attaching package: 'foreach'
+
+The following objects are masked from 'package:purrr':
+
+    accumulate, when
+
+Loading required package: iterators
+Loading required package: snow
+
+Attaching package: 'parallel'
+
+The following objects are masked from 'package:snow':
+
+    closeNode, clusterApply, clusterApplyLB, clusterCall, clusterEvalQ,
+    clusterExport, clusterMap, clusterSplit, makeCluster, parApply,
+    parCapply, parLapply, parRapply, parSapply, recvData, recvOneData,
+    sendData, splitIndices, stopCluster
+
+Loading required package: Matrix
+
+Attaching package: 'Matrix'
+
+The following objects are masked from 'package:tidyr':
+
+    expand, pack, unpack
+
+
+Attaching package: 'expm'
+
+The following object is masked from 'package:Matrix':
+
+    expm
+
+[1] "2"                                           
+[2] "/data/WIPH-CanDetect/HealthEco/output/optim/"
+[3] "age70plus"                                   
+[4] "female"                                      
+[5] "RS"                                          
+[6] "200000"                                      
+[7] "opt20251112"                                 
+[1] "Processing: site = stom ; age70plus = 0 ; female = 0"
+[1] "Method: RS ; Sampling no.: 2e+05"
+Starting optimization for 4-stage model using Random Search ...
+Number of initial samples: 2e+05 
+Initial objective value: 2972.475 
+
+
+Optimization complete!
+Method: Random Search 
+Convergence: Random search completed with 2e+05 samples 
+Total samples evaluated: 2e+05 
+Total time: 165.36 minutes
+Final parameters:
+  tp12: 0.0170
+  tp23: 0.0587
+  tp34: 0.0828
+  tp1: 0.0449
+  tp2: 0.0459
+  tp3: 0.0829
+  tp4: 0.1848
+Final likelihood: -2766.78 

@@ -1,0 +1,623 @@
+---
+title: "Referral Record Concordance Check"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+```{r, include=FALSE}
+rm(list = ls())
+library(tidyverse)
+library(tidyr)
+source("/data/WIPH-CanDetect/HealthEco/route.R")
+source(file.path(scr, "data_clean", "fn_clean.R"))
+ugi_symp <- readRDS(file.path(wd, "ugi_symp_upd2026.rds"))
+# Load CPRD referral data after relevance screening
+# Keep UGI Symptom 28+7 and all 2WW
+cprd_ref_ugi_symp <- readRDS(file.path(wd, "create_study_pop_interm", "cprd_ref_ugi_symp_upd2026.rds")) %>% 
+  select(e_patid, event_date, refurgencyid, has_symptom) %>% 
+  mutate(refurgencyid = case_when(
+    refurgencyid == 1 ~ "2 Week Wait",
+    refurgencyid == 2 ~ "Urgent",
+    refurgencyid == 3 ~ "Soon",
+    refurgencyid == 4 ~ "Routine",
+    refurgencyid == 5 ~ "Dated",
+    TRUE ~ "Unknown"
+  )) %>% distinct(.keep_all = TRUE)
+
+# Load HES OP referral data after relevance screening
+# By specialty and referral sources
+hes_op <- readRDS(file = file.path(wd, "create_study_pop_interm", "hes_op_upd2026.rds"))
+# Load referral sources codes related to GP
+refsourc_code <- scan(file.path(wd, "code_list", "refsourc_code.txt"))
+# Load consultant specialty codes related to UGI
+mainspef_code <- scan(file.path(wd, "code_list", "mainspef_code.txt"), what = "")
+tretspef_code <- scan(file.path(wd, "code_list", "tretspef_code.txt"), what = "")
+```
+
+```{r, include=FALSE}
+# Function 1: 
+# collapse records within threshold of days
+collapse_records <- function(dates, threshold_days = 7) {
+  # Assign group IDs by checking if each date is within threshold of the group's start date
+  group_id <- integer(length(dates))
+  current_group <- 1L
+  group_start <- dates[1]
+  
+  for (i in seq_along(dates)) {
+    if (as.numeric(dates[i] - group_start) > threshold_days) {
+      current_group <- current_group + 1L
+      group_start <- dates[i]
+    }
+    group_id[i] <- current_group
+  }
+  group_id
+}
+
+# Function 2: 
+# Takes a CPRD and OP subset, joins on e_patid, finds the *closest* OP record
+# within the date window for each CPRD record, and flags unmatched records
+# from both sides.
+match_with_date <- function(cprd_df, op_df,
+                            cprd_date_col = "event_date",
+                            op_date_col   = "action_date") {
+  
+  # Step 1: cross-join on e_patid, then filter to pairs within date window
+  paired <- inner_join(cprd_df, op_df, by = "e_patid", relationship = "many-to-many") %>%
+    mutate(
+      date_diff = as.numeric(abs(difftime(.data[[op_date_col]],
+                                          .data[[cprd_date_col]],
+                                          units = "days")))
+    ) %>%
+    filter(date_diff <= DATE_WINDOW)
+  
+  # Step 2: for each CPRD record, keep only the closest OP match (best match)
+  best_match <- paired %>%
+    group_by(e_patid, .data[[cprd_date_col]]) %>%
+    slice_min(date_diff, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(match_status = "In both")
+  
+  # Step 3: CPRD records with no match in OP within window
+  cprd_only <- cprd_df %>%
+    anti_join(
+      best_match %>% select(e_patid, all_of(cprd_date_col)),
+      by = c("e_patid", cprd_date_col)
+    ) %>%
+    mutate(match_status = "CPRD only")
+  
+  # Step 4: OP records with no match in CPRD within window
+  op_only <- op_df %>%
+    anti_join(
+      best_match %>% select(e_patid, all_of(op_date_col)),
+      by = c("e_patid", op_date_col)
+    ) %>%
+    mutate(match_status = "OP only")
+  
+  # Step 5: bind all three groups
+  # (columns not present in a group will become NA automatically)
+  bind_rows(best_match, cprd_only, op_only)
+}
+```
+
+## Objectives
+#### Explore the possibility of further cleaning CPRD and HES OP referral data and removing duplications.
+#### Explore the concordance between CPRD referrals and HES OP referrals, focusing on 2 Week Wait (2WW), and consider sources and specialties in HES OP.
+#### Support decisions on methods used in the model paper and the diagnostic route mapping paper.
+#### <span style="color: red;">Note, the impact of the method choice on the model paper is actually very limited. First, the model paper only looks at the first records, which means duplication removal is not very important. Second, in the model paper, the actual referrals only relate to the 2-step AFT model, which is put in supplementary materials</span> 
+
+
+### First, look two patients with multiple referral records in CPRD
+```{r, echo=FALSE}
+top_ids <- cprd_ref_ugi_symp %>%
+  count(e_patid, sort = TRUE) %>%
+  slice_head(n = 2) %>%
+  pull(e_patid)
+
+# View all their records
+cprd_ref_ugi_symp %>%
+  filter(e_patid %in% top_ids) %>%
+  arrange(e_patid, event_date) 
+
+```
+### Look at those with multiple 2 Week Wait in CPRD 
+```{r, echo=FALSE}
+top_ids <- cprd_ref_ugi_symp %>%
+  filter(refurgencyid == "2 Week Wait") %>% 
+  count(e_patid, sort = TRUE) %>%
+  slice_head(n = 2) %>%
+  pull(e_patid)
+
+# View all their records
+cprd_ref_ugi_symp %>%
+  filter(e_patid %in% top_ids) %>%
+  arrange(e_patid, event_date) 
+```
+### Clean CPRD referrals
+Some referrals, even 2WW, are too close.  
+Let's collapse these into one, if they happened within 7 days.
+For those collapsed together, if any record is 2WW, code this record as 2WW; and if any record is with symptom, code this as with symptom
+
+```{r, echo=FALSE}
+cprd_ref_clean <- cprd_ref_ugi_symp %>%
+  arrange(e_patid, event_date) %>%
+  group_by(e_patid) %>%
+  mutate(
+    visit_group = collapse_records(event_date, threshold_days = 7)
+  ) %>%
+  group_by(e_patid, visit_group) %>%
+  summarise(
+    event_date   = min(event_date),   # keep the earliest date
+    refurgencyid   = if (any(refurgencyid == "2 Week Wait")) "2 Week Wait"
+    else first(refurgencyid),  # prioritise "2 Week Wait"
+    has_symptom = if(any(has_symptom == "with symptom")) "with symptom"
+    else first(has_symptom),
+    across(-c(event_date, refurgencyid), first),  # keep first value of other cols
+    .groups = "drop"
+  ) %>%
+  select(-visit_group)
+```
+
+---
+
+### Move on to HES OP
+Start with the most naive way - remove HES OP records before 2012 and after 2018 and remove duplicated records with the same ID, request date, urgency type and main specialty
+
+Match CPRD referrals to HES OP records, focusing on 2WW in CPRD
+
+Consider CPRD and HES records for same individual within  90  days as same records
+```{r, message=FALSE, echo=FALSE}
+DATE_WINDOW <- 90  # days (~3 months); adjust as needed
+DATE_WINDOW
+```
+
+<span style="color: red;">Only 3% of CPRD 2WW can't be matched to HES OP</span> 
+```{r, echo=FALSE}
+op_record <- hes_op_clean2(hes_op)
+op_record_clean <- op_record %>% 
+  distinct(e_patid, action_date, action_type, mainspef, .keep_all = TRUE)
+
+# WEEK WAIT ONLY
+cprd_2ww <- cprd_ref_clean %>% filter(refurgencyid == "2 Week Wait")
+op_2ww   <- op_record_clean
+
+merged_2ww <- match_with_date(cprd_2ww, op_2ww)
+
+record_summary_2ww <- merged_2ww %>%
+  count(match_status) %>%
+  mutate(pct = round(100 * n / sum(n), 1))
+
+record_summary_2ww
+```
+
+
+### Continue to relax the duplication rule for HES OP
+If records happened within 7 days, recode as one
+The number of HES OP records are reduced. This does not affect the matching result
+```{r, echo=FALSE}
+op_record <- hes_op_clean2(hes_op)
+
+op_record_clean <- op_record %>%
+  distinct(e_patid, action_date, action_type, mainspef, .keep_all = TRUE) %>% 
+  arrange(e_patid, action_date) %>%
+  group_by(e_patid) %>%
+  mutate(
+    visit_group = collapse_records(action_date, threshold_days = 7)
+  ) %>%
+  group_by(e_patid, visit_group) %>%
+  summarise(
+    action_date   = min(action_date),   # keep the earliest date
+    action_type   = if (any(action_type == "2 Week Wait")) "2 Week Wait"
+                    else first(action_type),  # prioritise "2 Week Wait"
+    across(-c(action_date, action_type), first),  # keep first value of other cols
+    .groups = "drop"
+  ) %>%
+  select(-visit_group)
+
+# WEEK WAIT ONLY
+cprd_2ww <- cprd_ref_clean %>% filter(refurgencyid == "2 Week Wait") %>% 
+  mutate(cprd_id = row_number())
+op_2ww   <- op_record_clean
+
+merged_2ww <- match_with_date(cprd_2ww, op_2ww)
+
+record_summary_2ww <- merged_2ww %>%
+  count(match_status) %>%
+  mutate(pct = round(100 * n / sum(n), 1))
+
+record_summary_2ww
+
+# save matched cprd id
+matched_id <- merged_2ww %>% filter(!is.na(cprd_id) & match_status == "In both") %>% select(cprd_id)
+
+saveRDS(matched_id$cprd_id, file.path(output, "check_matched_id.rds"))
+``` 
+
+### Continue to filter HES OP; Now, restrict sources to from GP 
+1461-289=1172 2WW records in CPRD are not matched to HES OP, because the corresponding HES OP records are not labeled as "from GP". 
+However, the number of HES OP records has reduced significantly
+```{r, echo=FALSE}
+op_record <- hes_op_clean2(hes_op)
+
+op_record_clean <- op_record %>%
+  distinct(e_patid, action_date, action_type, mainspef, .keep_all = TRUE) %>% 
+  filter(refsourc %in% refsourc_code) %>% # from GP only
+  arrange(e_patid, action_date) %>%
+  group_by(e_patid) %>%
+  mutate(
+    visit_group = collapse_records(action_date, threshold_days = 7)
+  ) %>%
+  group_by(e_patid, visit_group) %>%
+  summarise(
+    action_date   = min(action_date),   # keep the earliest date
+    action_type   = if (any(action_type == "2 Week Wait")) "2 Week Wait"
+                    else first(action_type),  # prioritise "2 Week Wait"
+    across(-c(action_date, action_type), first),  # keep first value of other cols
+    .groups = "drop"
+  ) %>%
+  select(-visit_group)
+
+# WEEK WAIT ONLY
+cprd_2ww <- cprd_ref_clean %>% filter(refurgencyid == "2 Week Wait") %>% 
+  mutate(cprd_id = row_number())
+op_2ww   <- op_record_clean
+
+merged_2ww <- match_with_date(cprd_2ww, op_2ww)
+
+record_summary_2ww <- merged_2ww %>%
+  count(match_status) %>%
+  mutate(pct = round(100 * n / sum(n), 1))
+
+record_summary_2ww
+
+# save unmatched cprd id
+unmatched_id <- merged_2ww %>% filter(!is.na(cprd_id) & match_status == "CPRD only") %>% select(cprd_id)
+
+saveRDS(unmatched_id$cprd_id, file.path(output, "check_unmatched_id.rds"))
+``` 
+
+
+### Filter out these recorded as not first attendance in HES OP
+Significantly reduce the number of HES OP records.
+But increase 1000 unmatched CPRD 2WW records
+```{r, echo=FALSE}
+op_record <- hes_op_clean2(hes_op)
+
+op_record_clean <- op_record %>%
+  distinct(e_patid, action_date, action_type, mainspef, .keep_all = TRUE) %>% 
+  filter(refsourc %in% refsourc_code) %>% # from GP only
+  filter(firstatt %in% c("1", "3", "X")) %>%  # first attendance only or unknown
+  # filter(attended %in% c(5,6,9)) %>%  # only attended or unknown
+  arrange(e_patid, action_date) %>%
+  group_by(e_patid) %>%
+  mutate(
+    visit_group = collapse_records(action_date, threshold_days = 7)
+  ) %>%
+  group_by(e_patid, visit_group) %>%
+  summarise(
+    action_date   = min(action_date),   # keep the earliest date
+    action_type   = if (any(action_type == "2 Week Wait")) "2 Week Wait"
+                    else first(action_type),  # prioritise "2 Week Wait"
+    across(-c(action_date, action_type), first),  # keep first value of other cols
+    .groups = "drop"
+  ) %>%
+  select(-visit_group)
+
+nrow(op_record_clean)
+
+# WEEK WAIT ONLY
+cprd_2ww <- cprd_ref_clean %>% filter(refurgencyid == "2 Week Wait")
+op_2ww   <- op_record_clean
+
+merged_2ww <- match_with_date(cprd_2ww, op_2ww)
+
+record_summary_2ww <- merged_2ww %>%
+  count(match_status) %>%
+  mutate(pct = round(100 * n / sum(n), 1))
+
+record_summary_2ww
+```
+
+### Or filter out those recorded as not attended in HES OP
+Moderately reduce HES OP number.
+But increase about 700 unmatched CPRD 2WW, suggesting that some 2WWs were not attended. 
+```{r, echo=FALSE}
+op_record <- hes_op_clean2(hes_op)
+
+op_record_clean <- op_record %>%
+  distinct(e_patid, action_date, action_type, mainspef, .keep_all = TRUE) %>% 
+  filter(refsourc %in% refsourc_code) %>% # from GP only
+  # filter(firstatt %in% c("1", "3", "X")) %>%  # first attendance only or unknown
+  filter(attended %in% c(5,6,9)) %>%  # only attended or unknown
+  arrange(e_patid, action_date) %>%
+  group_by(e_patid) %>%
+  mutate(
+    visit_group = collapse_records(action_date, threshold_days = 7)
+  ) %>%
+  group_by(e_patid, visit_group) %>%
+  summarise(
+    action_date   = min(action_date),   # keep the earliest date
+    action_type   = if (any(action_type == "2 Week Wait")) "2 Week Wait"
+                    else first(action_type),  # prioritise "2 Week Wait"
+    across(-c(action_date, action_type), first),  # keep first value of other cols
+    .groups = "drop"
+  ) %>%
+  select(-visit_group)
+
+# WEEK WAIT ONLY
+cprd_2ww <- cprd_ref_clean %>% filter(refurgencyid == "2 Week Wait")
+op_2ww   <- op_record_clean
+
+merged_2ww <- match_with_date(cprd_2ww, op_2ww)
+
+record_summary_2ww <- merged_2ww %>%
+  count(match_status) %>%
+  mutate(pct = round(100 * n / sum(n), 1))
+
+record_summary_2ww
+```
+
+### Decide not to filter by attance or first referral
+Because CPRD referrals don't have such information;
+and also our assumption is that the referral action represents GP's attention, which should impact diagnostic interval regardless results.
+
+---
+
+### Explore sources of those matched previously but unmatched when restricting HES OP to GP related referrals
+5 = Referral from a consultant<br>
+11 = Other<br>
+97 = Other – not initiated by the consultant responsible for the consultant outpatient episode<br>
+First overall tabulation; then tabulate by whether the CPRD referral is with symptoms.
+No significant difference.
+```{r, echo=FALSE}
+op_record <- hes_op_clean2(hes_op)
+
+op_record_clean <- op_record %>%
+  distinct(e_patid, action_date, action_type, mainspef, .keep_all = TRUE) %>%
+  arrange(e_patid, action_date) %>%
+  group_by(e_patid) %>%
+  mutate(
+    visit_group = collapse_records(action_date, threshold_days = 7)
+  ) %>%
+  group_by(e_patid, visit_group) %>%
+  summarise(
+    action_date   = min(action_date),   # keep the earliest date
+    action_type   = if (any(action_type == "2 Week Wait")) "2 Week Wait"
+                    else first(action_type),  # prioritise "2 Week Wait"
+    across(-c(action_date, action_type), first),  # keep first value of other cols
+    .groups = "drop"
+  ) %>%
+  select(-visit_group)
+
+# WEEK WAIT ONLY
+cprd_2ww <- cprd_ref_clean %>% filter(refurgencyid == "2 Week Wait") %>% 
+  mutate(cprd_id = row_number())
+op_2ww   <- op_record_clean
+
+merged_2ww <- match_with_date(cprd_2ww, op_2ww)
+
+unmatched_id <- readRDS(file.path(output, "check_unmatched_id.rds"))
+unmatched <- merged_2ww %>% 
+  filter(match_status == "In both" & cprd_id %in% unmatched_id) %>% 
+  count(refsourc) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>% 
+  arrange(desc(n))
+unmatched
+
+unmatched2 <- merged_2ww %>% 
+  filter(match_status == "In both" & cprd_id %in% unmatched_id) %>% 
+  group_by(has_symptom) %>% 
+  count(refsourc) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>% 
+  arrange(has_symptom, desc(n))
+unmatched2
+
+``` 
+
+### Restricting source to from GP, filter specialty using the current code list
+The unmatched CPRD 2WW increase almost by 2000
+```{r, echo=FALSE}
+op_record <- hes_op_clean(hes_op, refsourc_code, mainspef_code, tretspef_code)
+
+op_record_clean <- op_record %>%
+  distinct(e_patid, action_date, action_type, mainspef, .keep_all = TRUE) %>% 
+  arrange(e_patid, action_date) %>%
+  group_by(e_patid) %>%
+  mutate(
+    visit_group = collapse_records(action_date, threshold_days = 7)
+  ) %>%
+  group_by(e_patid, visit_group) %>%
+  summarise(
+    action_date   = min(action_date),   # keep the earliest date
+    action_type   = if (any(action_type == "2 Week Wait")) "2 Week Wait"
+                    else first(action_type),  # prioritise "2 Week Wait"
+    across(-c(action_date, action_type), first),  # keep first value of other cols
+    .groups = "drop"
+  ) %>%
+  select(-visit_group)
+
+# WEEK WAIT ONLY
+cprd_2ww <- cprd_ref_clean %>% filter(refurgencyid == "2 Week Wait") %>% 
+  mutate(cprd_id = row_number())
+op_2ww   <- op_record_clean
+
+merged_2ww <- match_with_date(cprd_2ww, op_2ww)
+
+record_summary_2ww <- merged_2ww %>%
+  count(match_status) %>%
+  mutate(pct = round(100 * n / sum(n), 1))
+
+record_summary_2ww
+
+# save unmatched cprd id
+unmatched_id2 <- merged_2ww %>% filter(!is.na(cprd_id) & match_status == "CPRD only") %>% select(cprd_id)
+
+saveRDS(unmatched_id2$cprd_id, file.path(output, "check_unmatched_id2.rds"))
+``` 
+
+### Explore main specialty for those matched previously but unmatched when introducing specialty restriction
+I don't look at treatment specialty as it is too messy.<br>
+101 = Urology<br>
+120 = Ear Nose and Throat<br>
+330 = Dermatology<br>
+340 = Respiratory Medicine<br>
+502 = Gynaecology<br>
+950 = Nursing<br>
+960 = Allied Health Professional<br>
+```{r, echo=FALSE}
+op_record <- hes_op_clean2(hes_op)
+
+op_record_clean <- op_record %>%
+  distinct(e_patid, action_date, action_type, mainspef, .keep_all = TRUE) %>% 
+  filter(refsourc %in% refsourc_code) %>% # from GP only
+  arrange(e_patid, action_date) %>%
+  group_by(e_patid) %>%
+  mutate(
+    visit_group = collapse_records(action_date, threshold_days = 7)
+  ) %>%
+  group_by(e_patid, visit_group) %>%
+  summarise(
+    action_date   = min(action_date),   # keep the earliest date
+    action_type   = if (any(action_type == "2 Week Wait")) "2 Week Wait"
+                    else first(action_type),  # prioritise "2 Week Wait"
+    across(-c(action_date, action_type), first),  # keep first value of other cols
+    .groups = "drop"
+  ) %>%
+  select(-visit_group)
+
+# WEEK WAIT ONLY
+cprd_2ww <- cprd_ref_clean %>% filter(refurgencyid == "2 Week Wait") %>% 
+  mutate(cprd_id = row_number())
+op_2ww   <- op_record_clean
+
+merged_2ww <- match_with_date(cprd_2ww, op_2ww)
+
+unmatched_id2 <- readRDS(file.path(output, "check_unmatched_id2.rds"))
+
+unmatched <- merged_2ww %>% 
+  filter(match_status == "In both" & cprd_id %in% unmatched_id2) %>% 
+    count(mainspef) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>% 
+  arrange(desc(n))
+unmatched
+
+``` 
+
+### Further tabulate CPRD 2WW with-symptom status within 1) overall matched cases and 2) previously matched but unmatched when restricting specialty
+The result suggests that CPRD referrals with symptoms do have better concordance with HES OP referrals with specific specialty  
+
+```{r, echo=FALSE}
+unmatched2 <- merged_2ww %>% 
+  filter(match_status == "In both") %>% 
+  count(has_symptom) %>%
+  mutate(pct = round(100 * n / sum(n), 1))
+unmatched2
+
+unmatched3 <- merged_2ww %>% 
+  filter(match_status == "In both" & cprd_id %in% unmatched_id2) %>% 
+  count(has_symptom) %>%
+  mutate(pct = round(100 * n / sum(n), 1))
+unmatched3
+```
+
+---
+
+### Include all 2WW in HES OP
+Including all 2WW in HES OP reduces about 1000 unmatched CPRD referrals, while slightly increase unmatched HES referrals
+```{r, echo=FALSE}
+op_record <- hes_op_clean(hes_op, refsourc_code, mainspef_code, tretspef_code, 
+                          all_2ww = TRUE)
+
+op_record_clean <- op_record %>%
+  distinct(e_patid, action_date, action_type, mainspef, .keep_all = TRUE) %>% 
+  arrange(e_patid, action_date) %>%
+  group_by(e_patid) %>%
+  mutate(
+    visit_group = collapse_records(action_date, threshold_days = 7)
+  ) %>%
+  group_by(e_patid, visit_group) %>%
+  summarise(
+    action_date   = min(action_date),   # keep the earliest date
+    action_type   = if (any(action_type == "2 Week Wait")) "2 Week Wait"
+                    else first(action_type),  # prioritise "2 Week Wait"
+    across(-c(action_date, action_type), first),  # keep first value of other cols
+    .groups = "drop"
+  ) %>%
+  select(-visit_group)
+
+# WEEK WAIT ONLY
+cprd_2ww <- cprd_ref_clean %>% filter(refurgencyid == "2 Week Wait") %>% 
+  mutate(cprd_id = row_number())
+op_2ww   <- op_record_clean
+
+merged_2ww <- match_with_date(cprd_2ww, op_2ww)
+
+record_summary_2ww <- merged_2ww %>%
+  count(match_status) %>%
+  mutate(pct = round(100 * n / sum(n), 1))
+
+record_summary_2ww
+
+``` 
+
+### Explore sources and main specialties of 2WW in HES OP
+70% from GP (3)<br>
+19% from consultant (5)<br>
+8% from others (11, 97)<br>
+In terms of specialty, the top three (100 = General Surgery, 300 = General Internal Medicine, and 301 = Gastroenterology) are in our code list.
+```{r, echo=FALSE}
+op_record <- hes_op_clean2(hes_op) 
+
+op_record_clean <- op_record %>%
+  distinct(e_patid, action_date, action_type, mainspef, .keep_all = TRUE) %>%
+  arrange(e_patid, action_date) %>%
+  group_by(e_patid) %>%
+  mutate(
+    visit_group = collapse_records(action_date, threshold_days = 7)
+  ) %>%
+  group_by(e_patid, visit_group) %>%
+  summarise(
+    action_date   = min(action_date),   # keep the earliest date
+    action_type   = if (any(action_type == "2 Week Wait")) "2 Week Wait"
+                    else first(action_type),  # prioritise "2 Week Wait"
+    across(-c(action_date, action_type), first),  # keep first value of other cols
+    .groups = "drop"
+  ) %>%
+  select(-visit_group)
+  
+op_record_clean %>% filter(action_type == "2 Week Wait") %>% 
+  count(refsourc) %>% 
+    mutate(pct = round(100 * n / sum(n), 1)) %>% 
+    arrange(desc(n))
+
+op_record_clean %>% filter(action_type == "2 Week Wait") %>% 
+  count(mainspef) %>% 
+  mutate(pct = round(100 * n / sum(n), 1)) %>% 
+  arrange(desc(n))
+```
+## Summary
+#### 96.5% of CPRD 2WW can be matched in HES OP withou many restrictions
+#### After restricting HES OP to GP sources, the unmatched CPRD 2WW number increases by over 1000
+#### Further restricting HES OP to selected specialty, the unmatched CPRD 2WW number increases by further 2000. In this case, 60% of CPRD 2WW are matched in HES
+#### CPRD referrals with symptoms match better than those without symptoms to HES OP with the specialty restriction
+
+## Conclusion
+#### Most CPRD referrals can be matched into HES OP, while some of them are not labelled as "from GP" and some of them are not in our specialty code list. A possible reason is that some referrals are considered not as the first referrals, initiated by GP.
+#### Although CPRD and HES OP can be roughly matched, given the substantial differences between the two datasets and unknown quality of recording, using both as complementary data sources is justifiable to identify referrals
+#### For CPRD, there is a trade-off on whether using 2WW without symptoms. I prefer to including them all. Although those without symptoms are more likely to be in an irrelevant specialty, but there seems more harm from losing those potentally relevant.
+#### For HES OP, although it is not perfect, I think using the current method, i.e. source and specialty, to filter the all data is justifiable, because We should not include all 2WW in HES OP, when we clearly know some of them not from GP or within the relevant specialties.
+#### For the model paper, as it looks at the first records only and the actual referrals only affect 2-step AFT models in the supplementary content, the impact of the method choice is minimum. 
+
+
+
+
+
+
+
+
+
+
+
+
